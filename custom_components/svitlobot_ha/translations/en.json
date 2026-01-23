@@ -3,18 +3,13 @@
     "step": {
       "user": {
         "title": "Svitlobot",
-        "description": "Telegram alerts when watched voltage sensor goes online/offline.",
+        "description": "Track voltage sensor online/offline and ping SvitloBot channel while online.",
         "data": {
-          "telegram_token": "Telegram Bot Token",
-          "telegram_chat_id": "Telegram Chat ID",
           "voltage_entity_id": "Voltage entity",
-          "entity_id": "Watched entity (legacy)",
+          "svitlobot_channel_key": "SvitloBot channel key",
           "debounce_seconds": "Debounce seconds",
           "stale_timeout_seconds": "Offline if no updates for N seconds",
-          "refresh_seconds": "Force update interval (seconds)",
-          "notify_on_start": "Notify on integration start",
-          "telegram_enabled": "Enable Telegram notifications",
-          "svitlobot_channel_key": "SvitloBot channel key"
+          "refresh_seconds": "Force update interval (seconds)"
         }
       }
     }
@@ -24,8 +19,10 @@
       "init": {
         "title": "Svitlobot settings",
         "data": {
-          "telegram_enabled": "Enable Telegram notifications",
-          "svitlobot_channel_key": "SvitloBot channel key"
+          "svitlobot_channel_key": "SvitloBot channel key",
+          "debounce_seconds": "Debounce seconds",
+          "stale_timeout_seconds": "Offline if no updates for N seconds",
+          "refresh_seconds": "Force update interval (seconds)"
         }
       }
     }
