@@ -28,7 +28,7 @@ from .svitlobot import async_channel_ping
 
 _LOGGER = logging.getLogger(__name__)
 
-SVITLOBOT_PING_INTERVAL_S = 30  # ping кожні 30с, поки "онлайн"
+SVITLOBOT_PING_INTERVAL_S = 70  # ping кожні 30с, поки "онлайн"
 
 
 @dataclass(frozen=True)
