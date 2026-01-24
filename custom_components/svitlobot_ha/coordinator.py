@@ -28,7 +28,7 @@ from .svitlobot import async_channel_ping
 
 _LOGGER = logging.getLogger(__name__)
 
-SVITLOBOT_PING_INTERVAL_S = 70  # ping кожні 30с, поки "онлайн"
+SVITLOBOT_PING_INTERVAL_S = 65
 
 
 @dataclass(frozen=True)
@@ -71,9 +71,15 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
         self._unsub_state = None
         self._unsub_timer = None
 
-        self._check_interval = 5  # щоб ping був максимально близько до 30с
+        self._check_interval = 5
+        self._periodic_lock = asyncio.Lock()
+
         self._last_refresh_ts = 0.0
         self._last_svitlobot_ping_ts = 0.0
+
+        self._probe_when_offline = True
+        self._probe_every = 20
+        self._last_probe_ts = 0.0
 
     def _get_report_time(self, st) -> object:
         rep = getattr(st, "last_reported", None)
@@ -154,40 +160,55 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
         )
 
     async def _periodic_check(self, _now) -> None:
-        # ping кожні ~30с поки онлайн
-        if self.data and self.data.online:
-            self._fire_svitlobot_ping_if_needed()
+        async with self._periodic_lock:
+            # ping поки онлайн
+            if self.data and self.data.online:
+                self._fire_svitlobot_ping_if_needed()
 
-        # примусовий refresh сенсора (опційно)
-        now_ts = time.time()
-        if self._refresh_every > 0 and (now_ts - self._last_refresh_ts >= self._refresh_every):
-            self._last_refresh_ts = now_ts
-            try:
-                await self.hass.services.async_call(
-                    "homeassistant",
-                    "update_entity",
-                    {"entity_id": self._voltage_entity_id},
-                    blocking=True,
-                )
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("update_entity refresh failed")
+            now_ts = time.time()
 
-        online, state, _age = self._compute_online()
-        current_online = self.data.online if self.data else None
-        if current_online is None:
-            return
+            if self.data and self._probe_when_offline and (not self.data.online):
+                if now_ts - self._last_probe_ts >= self._probe_every:
+                    self._last_probe_ts = now_ts
+                    try:
+                        await self.hass.services.async_call(
+                            "homeassistant",
+                            "update_entity",
+                            {"entity_id": self._voltage_entity_id},
+                            blocking=True,
+                        )
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.exception("update_entity probe failed")
 
-        if online == current_online:
-            if self.data and self.data.state != state:
-                self._set_data(online, state)
-            return
+            # опційний refresh сенсора (як було)
+            if self._refresh_every > 0 and (now_ts - self._last_refresh_ts >= self._refresh_every):
+                self._last_refresh_ts = now_ts
+                try:
+                    await self.hass.services.async_call(
+                        "homeassistant",
+                        "update_entity",
+                        {"entity_id": self._voltage_entity_id},
+                        blocking=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("update_entity refresh failed")
 
-        if self._pending_task and not self._pending_task.done():
-            self._pending_task.cancel()
+            online, state, _age = self._compute_online()
+            current_online = self.data.online if self.data else None
+            if current_online is None:
+                return
 
-        self._pending_task = self.hass.async_create_task(
-            self._debounced_commit(new_online=online)
-        )
+            if online == current_online:
+                if self.data and self.data.state != state:
+                    self._set_data(online, state)
+                return
+
+            if self._pending_task and not self._pending_task.done():
+                self._pending_task.cancel()
+
+            self._pending_task = self.hass.async_create_task(
+                self._debounced_commit(new_online=online)
+            )
 
     async def _debounced_commit(self, new_online: bool) -> None:
         try:
