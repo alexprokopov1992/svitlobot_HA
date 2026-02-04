@@ -82,7 +82,9 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
         self._voltage_entity_id = str(_cfg(CONF_VOLTAGE_ENTITY_ID)).strip()
 
         self._debounce = int(_cfg(CONF_DEBOUNCE_SECONDS, DEFAULT_DEBOUNCE_SECONDS))
-        self._stale_timeout = int(_cfg(CONF_STALE_TIMEOUT_SECONDS, DEFAULT_STALE_TIMEOUT_SECONDS))
+        self._stale_timeout = int(
+            _cfg(CONF_STALE_TIMEOUT_SECONDS, DEFAULT_STALE_TIMEOUT_SECONDS)
+        )
         self._refresh_every = int(_cfg(CONF_REFRESH_SECONDS, DEFAULT_REFRESH_SECONDS))
 
         self._svitlobot_channel_key = str(
@@ -90,6 +92,7 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
         ).strip()
 
         self._pending_task: asyncio.Task | None = None
+        self._pending_target: bool | None = None  # <-- NEW: target state for debounce
         self._unsub_state = None
         self._unsub_timer = None
 
@@ -102,7 +105,6 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
         self._probe_when_offline = True
         self._probe_every = 20
         self._last_probe_ts = 0.0
-
 
     def _get_report_time(self, st) -> object:
         rep = getattr(st, "last_reported", None)
@@ -137,14 +139,36 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
             return
 
         now_ts = time.time()
-        if self._last_svitlobot_ping_ts and (now_ts - self._last_svitlobot_ping_ts) < SVITLOBOT_PING_INTERVAL_S:
+        if (
+            self._last_svitlobot_ping_ts
+            and (now_ts - self._last_svitlobot_ping_ts) < SVITLOBOT_PING_INTERVAL_S
+        ):
             return
 
         self._last_svitlobot_ping_ts = now_ts
-        self.hass.async_create_task(async_channel_ping(self.hass, self._svitlobot_channel_key))
+        self.hass.async_create_task(
+            async_channel_ping(self.hass, self._svitlobot_channel_key)
+        )
+
+    def _schedule_debounced_commit(self, new_power_on: bool) -> None:
+        """Schedule debounce task, without endlessly cancelling it from periodic checks."""
+        if (
+            self._pending_task
+            and not self._pending_task.done()
+            and self._pending_target == new_power_on
+        ):
+            # A task for the same target is already pending; don't cancel/restart it.
+            return
+
+        if self._pending_task and not self._pending_task.done():
+            self._pending_task.cancel()
+
+        self._pending_target = new_power_on
+        self._pending_task = self.hass.async_create_task(
+            self._debounced_commit(new_power_on=new_power_on)
+        )
 
     async def async_start(self) -> None:
-
         power_on, state, voltage, _age = self._compute_power()
         self._set_data(power_on, state, voltage)
 
@@ -170,17 +194,13 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
                 new_voltage,
             )
 
+            # If power_on is unchanged, only update details (state/voltage) when changed
             if self.data is not None and self.data.power_on == new_power_on:
                 if self.data.state != new_state_str or self.data.voltage != new_voltage:
                     self._set_data(new_power_on, new_state_str, new_voltage)
                 return
 
-            if self._pending_task and not self._pending_task.done():
-                self._pending_task.cancel()
-
-            self._pending_task = self.hass.async_create_task(
-                self._debounced_commit(new_power_on=new_power_on)
-            )
+            self._schedule_debounced_commit(new_power_on=new_power_on)
 
         self._unsub_state = async_track_state_change_event(
             self.hass,
@@ -196,11 +216,13 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
 
     async def _periodic_check(self, _now) -> None:
         async with self._periodic_lock:
+            # Only ping when coordinator data says power is on
             if self.data and self.data.power_on:
                 self._fire_svitlobot_ping_if_needed()
 
             now_ts = time.time()
 
+            # Probe sensor when offline to recover faster
             if self.data and self._probe_when_offline and (not self.data.power_on):
                 if now_ts - self._last_probe_ts >= self._probe_every:
                     self._last_probe_ts = now_ts
@@ -213,10 +235,13 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
                                 blocking=True,
                             )
                     except TimeoutError:
-                        _LOGGER.warning("update_entity probe timeout for %s", self._voltage_entity_id)
+                        _LOGGER.warning(
+                            "update_entity probe timeout for %s", self._voltage_entity_id
+                        )
                     except Exception:
                         _LOGGER.exception("update_entity probe failed")
 
+            # Periodic refresh regardless of current state
             if self._refresh_every > 0 and (now_ts - self._last_refresh_ts >= self._refresh_every):
                 self._last_refresh_ts = now_ts
                 try:
@@ -228,26 +253,23 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
                             blocking=True,
                         )
                 except TimeoutError:
-                    _LOGGER.warning("update_entity refresh timeout for %s", self._voltage_entity_id)
+                    _LOGGER.warning(
+                        "update_entity refresh timeout for %s", self._voltage_entity_id
+                    )
                 except Exception:
                     _LOGGER.exception("update_entity refresh failed")
 
             power_on, state, voltage, _age = self._compute_power()
-            current_power_on = self.data.power_on if self.data else None
-            if current_power_on is None:
+            if self.data is None:
                 return
 
-            if power_on == current_power_on:
-                if self.data and (self.data.state != state or self.data.voltage != voltage):
+            if power_on == self.data.power_on:
+                if self.data.state != state or self.data.voltage != voltage:
                     self._set_data(power_on, state, voltage)
                 return
 
-            if self._pending_task and not self._pending_task.done():
-                self._pending_task.cancel()
-
-            self._pending_task = self.hass.async_create_task(
-                self._debounced_commit(new_power_on=power_on)
-            )
+            # Power state differs: schedule debounce commit (without endless cancels)
+            self._schedule_debounced_commit(new_power_on=power_on)
 
     async def _debounced_commit(self, new_power_on: bool) -> None:
         try:
@@ -255,6 +277,9 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
                 await asyncio.sleep(self._debounce)
 
             current_power_on, current_state, current_voltage, _age = self._compute_power()
+
+            # If the state doesn't match the intended target, do nothing.
+            # Another event/periodic check will schedule a new target.
             if current_power_on != new_power_on:
                 return
 
@@ -265,6 +290,9 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
 
         except asyncio.CancelledError:
             return
+        finally:
+            # Clear pending target when task ends (success, mismatch, cancel, exception)
+            self._pending_target = None
 
     async def async_stop(self) -> None:
         if self._pending_task and not self._pending_task.done():
