@@ -61,7 +61,7 @@ def _is_power_on(state_str: str | None) -> tuple[bool, float | None]:
     v = _parse_voltage(state_str)
 
     if v is None:
-        return (True, None)
+        return (False, None)
 
     return (v >= POWER_ON_THRESHOLD, v)
 
@@ -103,17 +103,10 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
         self._probe_every = 20
         self._last_probe_ts = 0.0
 
-        self._last_meaningful_update = dt_util.utcnow()
 
-    def _mark_meaningful_now(self) -> None:
-        self._last_meaningful_update = dt_util.utcnow()
-
-    def _init_meaningful_from_state(self) -> None:
-        st = self.hass.states.get(self._voltage_entity_id)
-        if st is None:
-            self._last_meaningful_update = dt_util.utcnow()
-            return
-        self._last_meaningful_update = st.last_changed
+    def _get_report_time(self, st) -> object:
+        rep = getattr(st, "last_reported", None)
+        return rep or st.last_updated
 
     def _compute_power(self) -> tuple[bool, str | None, float | None, float | None]:
         st = self.hass.states.get(self._voltage_entity_id)
@@ -123,7 +116,7 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
         state_str = st.state
         power_on, voltage = _is_power_on(state_str)
 
-        age = (dt_util.utcnow() - self._last_meaningful_update).total_seconds()
+        age = (dt_util.utcnow() - self._get_report_time(st)).total_seconds()
         if power_on and self._stale_timeout > 0 and age > self._stale_timeout:
             return (False, state_str, voltage, age)
 
@@ -151,7 +144,6 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
         self.hass.async_create_task(async_channel_ping(self.hass, self._svitlobot_channel_key))
 
     async def async_start(self) -> None:
-        self._init_meaningful_from_state()
 
         power_on, state, voltage, _age = self._compute_power()
         self._set_data(power_on, state, voltage)
@@ -166,12 +158,6 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
 
             old_state_str = old_state.state if old_state else None
             new_state_str = new_state.state if new_state else None
-
-            if old_state is None or new_state is None:
-                self._mark_meaningful_now()
-            else:
-                if (new_state_str != old_state_str) or (new_state.attributes != old_state.attributes):
-                    self._mark_meaningful_now()
 
             new_power_on, new_voltage = _is_power_on(new_state_str)
 
