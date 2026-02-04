@@ -81,9 +81,18 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
         self._probe_every = 20
         self._last_probe_ts = 0.0
 
-    def _get_report_time(self, st) -> object:
-        rep = getattr(st, "last_reported", None)
-        return rep or st.last_updated
+        self._last_meaningful_update = dt_util.utcnow()
+
+    def _mark_meaningful_now(self) -> None:
+        self._last_meaningful_update = dt_util.utcnow()
+
+    def _init_meaningful_from_state(self) -> None:
+        st = self.hass.states.get(self._voltage_entity_id)
+        if st is None:
+            self._last_meaningful_update = dt_util.utcnow()
+            return
+
+        self._last_meaningful_update = st.last_changed
 
     def _compute_online(self) -> tuple[bool, str | None, float | None]:
         st = self.hass.states.get(self._voltage_entity_id)
@@ -93,7 +102,7 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
         state_str = st.state
         online = _is_online(state_str)
 
-        age = (dt_util.utcnow() - self._get_report_time(st)).total_seconds()
+        age = (dt_util.utcnow() - self._last_meaningful_update).total_seconds()
         if online and self._stale_timeout > 0 and age > self._stale_timeout:
             return (False, state_str, age)
 
@@ -117,21 +126,30 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
             return
 
         self._last_svitlobot_ping_ts = now_ts
-        self.hass.async_create_task(
-            async_channel_ping(self.hass, self._svitlobot_channel_key)
-        )
+        self.hass.async_create_task(async_channel_ping(self.hass, self._svitlobot_channel_key))
 
     async def async_start(self) -> None:
         online, state, _age = self._compute_online()
         self._set_data(online, state)
+        self._init_meaningful_from_state()
 
         if online:
             self._fire_svitlobot_ping_if_needed()
 
         @callback
         def _handle(event):
+            old_state = event.data.get("old_state")
             new_state = event.data.get("new_state")
+
+            old_state_str = old_state.state if old_state else None
             new_state_str = new_state.state if new_state else None
+
+            if old_state is None or new_state is None:
+                self._mark_meaningful_now()
+            else:
+                if (new_state_str != old_state_str) or (new_state.attributes != old_state.attributes):
+                    self._mark_meaningful_now()
+
             new_online = _is_online(new_state_str)
 
             # якщо статус не змінився — просто оновимо стан
@@ -234,7 +252,7 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
 
         if self._unsub_state:
             self._unsub_state()
-            self._unsub_state = None
+        self._unsub_state = None
 
         if self._unsub_timer:
             self._unsub_timer()
