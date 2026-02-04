@@ -19,6 +19,7 @@
       "init": {
         "title": "Svitlobot settings",
         "data": {
+          "voltage_entity_id": "Voltage entity",
           "svitlobot_channel_key": "SvitloBot channel key",
           "debounce_seconds": "Debounce seconds",
           "stale_timeout_seconds": "Offline if no updates for N seconds",

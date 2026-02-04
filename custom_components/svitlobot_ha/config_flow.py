@@ -99,6 +99,16 @@ class PowerWatchdogOptionsFlow(config_entries.OptionsFlow):
 
         schema = vol.Schema(
             {
+                # Allow changing the watched entity from the Options UI.
+                # IMPORTANT: Home Assistant keeps unique_id/title from the original Config Entry.
+                # If you rely on unique_id derived from the entity id, prefer delete & re-add.
+                vol.Optional(
+                    CONF_VOLTAGE_ENTITY_ID,
+                    default=str(_get(CONF_VOLTAGE_ENTITY_ID, "")).strip(),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig()
+                ),
+
                 vol.Optional(
                     CONF_SVITLOBOT_CHANNEL_KEY,
                     default=str(_get(CONF_SVITLOBOT_CHANNEL_KEY, DEFAULT_SVITLOBOT_CHANNEL_KEY))

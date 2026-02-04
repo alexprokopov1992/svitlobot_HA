@@ -1,7 +1,7 @@
 {
   "domain": "svitlobot_ha",
   "name": "Svitlobot",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "documentation": "https://github.com/alexprokopov1992/svitlobot_HA",
   "requirements": [],
   "codeowners": [],

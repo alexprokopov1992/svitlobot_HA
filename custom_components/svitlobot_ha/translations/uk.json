@@ -19,6 +19,7 @@
       "init": {
         "title": "Налаштування Svitlobot",
         "data": {
+          "voltage_entity_id": "Сутність напруги",
           "svitlobot_channel_key": "Ключ каналу SvitloBot",
           "debounce_seconds": "Затримка підтвердження (сек.)",
           "stale_timeout_seconds": "Вважати offline, якщо немає оновлень (сек.)",
