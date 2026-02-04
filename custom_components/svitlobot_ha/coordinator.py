@@ -205,25 +205,31 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
                 if now_ts - self._last_probe_ts >= self._probe_every:
                     self._last_probe_ts = now_ts
                     try:
+                        async with asyncio.timeout(10):
+                            await self.hass.services.async_call(
+                                "homeassistant",
+                                "update_entity",
+                                {"entity_id": self._voltage_entity_id},
+                                blocking=True,
+                            )
+                    except TimeoutError:
+                        _LOGGER.warning("update_entity probe timeout for %s", self._voltage_entity_id)
+                    except Exception:
+                        _LOGGER.exception("update_entity probe failed")
+
+            if self._refresh_every > 0 and (now_ts - self._last_refresh_ts >= self._refresh_every):
+                self._last_refresh_ts = now_ts
+                try:
+                    async with asyncio.timeout(10):
                         await self.hass.services.async_call(
                             "homeassistant",
                             "update_entity",
                             {"entity_id": self._voltage_entity_id},
                             blocking=True,
                         )
-                    except Exception:  # noqa: BLE001
-                        _LOGGER.exception("update_entity probe failed")
-
-            if self._refresh_every > 0 and (now_ts - self._last_refresh_ts >= self._refresh_every):
-                self._last_refresh_ts = now_ts
-                try:
-                    await self.hass.services.async_call(
-                        "homeassistant",
-                        "update_entity",
-                        {"entity_id": self._voltage_entity_id},
-                        blocking=True,
-                    )
-                except Exception:  # noqa: BLE001
+                except TimeoutError:
+                    _LOGGER.warning("update_entity refresh timeout for %s", self._voltage_entity_id)
+                except Exception:
                     _LOGGER.exception("update_entity refresh failed")
 
             power_on, state, voltage, _age = self._compute_power()
