@@ -23,6 +23,7 @@ from .const import (
     DEFAULT_REFRESH_SECONDS,
     CONF_SVITLOBOT_CHANNEL_KEY,
     DEFAULT_SVITLOBOT_CHANNEL_KEY,
+    POWER_ON_THRESHOLD,
 )
 from .svitlobot import async_channel_ping
 
@@ -33,15 +34,36 @@ SVITLOBOT_PING_INTERVAL_S = 65
 
 @dataclass(frozen=True)
 class WatchdogData:
-    online: bool
+    power_on: bool
     watched_entity_id: str
     state: str | None
+    voltage: float | None
 
 
-def _is_online(state_str: str | None) -> bool:
+def _parse_voltage(state_str: str | None) -> float | None:
+    """Best-effort float parsing. Returns None when state is non-numeric."""
     if state_str is None:
-        return False
-    return state_str not in OFFLINE_STATES
+        return None
+    s = str(state_str).strip().replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _is_power_on(state_str: str | None) -> tuple[bool, float | None]:
+    if state_str is None:
+        return (False, None)
+
+    if state_str in OFFLINE_STATES:
+        return (False, None)
+
+    v = _parse_voltage(state_str)
+
+    if v is None:
+        return (True, None)
+
+    return (v >= POWER_ON_THRESHOLD, v)
 
 
 class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
@@ -91,29 +113,29 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
         if st is None:
             self._last_meaningful_update = dt_util.utcnow()
             return
-
         self._last_meaningful_update = st.last_changed
 
-    def _compute_online(self) -> tuple[bool, str | None, float | None]:
+    def _compute_power(self) -> tuple[bool, str | None, float | None, float | None]:
         st = self.hass.states.get(self._voltage_entity_id)
         if st is None:
-            return (False, None, None)
+            return (False, None, None, None)
 
         state_str = st.state
-        online = _is_online(state_str)
+        power_on, voltage = _is_power_on(state_str)
 
         age = (dt_util.utcnow() - self._last_meaningful_update).total_seconds()
-        if online and self._stale_timeout > 0 and age > self._stale_timeout:
-            return (False, state_str, age)
+        if power_on and self._stale_timeout > 0 and age > self._stale_timeout:
+            return (False, state_str, voltage, age)
 
-        return (online, state_str, age)
+        return (power_on, state_str, voltage, age)
 
-    def _set_data(self, online: bool, state: str | None) -> None:
+    def _set_data(self, power_on: bool, state: str | None, voltage: float | None) -> None:
         self.async_set_updated_data(
             WatchdogData(
-                online=online,
+                power_on=power_on,
                 watched_entity_id=self._voltage_entity_id,
                 state=state,
+                voltage=voltage,
             )
         )
 
@@ -129,11 +151,12 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
         self.hass.async_create_task(async_channel_ping(self.hass, self._svitlobot_channel_key))
 
     async def async_start(self) -> None:
-        online, state, _age = self._compute_online()
-        self._set_data(online, state)
         self._init_meaningful_from_state()
 
-        if online:
+        power_on, state, voltage, _age = self._compute_power()
+        self._set_data(power_on, state, voltage)
+
+        if power_on:
             self._fire_svitlobot_ping_if_needed()
 
         @callback
@@ -150,19 +173,18 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
                 if (new_state_str != old_state_str) or (new_state.attributes != old_state.attributes):
                     self._mark_meaningful_now()
 
-            new_online = _is_online(new_state_str)
+            new_power_on, new_voltage = _is_power_on(new_state_str)
 
-            # якщо статус не змінився — просто оновимо стан
-            if self.data is not None and self.data.online == new_online:
-                if self.data.state != new_state_str:
-                    self._set_data(new_online, new_state_str)
+            if self.data is not None and self.data.power_on == new_power_on:
+                if self.data.state != new_state_str or self.data.voltage != new_voltage:
+                    self._set_data(new_power_on, new_state_str, new_voltage)
                 return
 
             if self._pending_task and not self._pending_task.done():
                 self._pending_task.cancel()
 
             self._pending_task = self.hass.async_create_task(
-                self._debounced_commit(new_online=new_online)
+                self._debounced_commit(new_power_on=new_power_on)
             )
 
         self._unsub_state = async_track_state_change_event(
@@ -179,13 +201,12 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
 
     async def _periodic_check(self, _now) -> None:
         async with self._periodic_lock:
-            # ping поки онлайн
-            if self.data and self.data.online:
+            if self.data and self.data.power_on:
                 self._fire_svitlobot_ping_if_needed()
 
             now_ts = time.time()
 
-            if self.data and self._probe_when_offline and (not self.data.online):
+            if self.data and self._probe_when_offline and (not self.data.power_on):
                 if now_ts - self._last_probe_ts >= self._probe_every:
                     self._last_probe_ts = now_ts
                     try:
@@ -198,7 +219,6 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
                     except Exception:  # noqa: BLE001
                         _LOGGER.exception("update_entity probe failed")
 
-            # опційний refresh сенсора (як було)
             if self._refresh_every > 0 and (now_ts - self._last_refresh_ts >= self._refresh_every):
                 self._last_refresh_ts = now_ts
                 try:
@@ -211,36 +231,35 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
                 except Exception:  # noqa: BLE001
                     _LOGGER.exception("update_entity refresh failed")
 
-            online, state, _age = self._compute_online()
-            current_online = self.data.online if self.data else None
-            if current_online is None:
+            power_on, state, voltage, _age = self._compute_power()
+            current_power_on = self.data.power_on if self.data else None
+            if current_power_on is None:
                 return
 
-            if online == current_online:
-                if self.data and self.data.state != state:
-                    self._set_data(online, state)
+            if power_on == current_power_on:
+                if self.data and (self.data.state != state or self.data.voltage != voltage):
+                    self._set_data(power_on, state, voltage)
                 return
 
             if self._pending_task and not self._pending_task.done():
                 self._pending_task.cancel()
 
             self._pending_task = self.hass.async_create_task(
-                self._debounced_commit(new_online=online)
+                self._debounced_commit(new_power_on=power_on)
             )
 
-    async def _debounced_commit(self, new_online: bool) -> None:
+    async def _debounced_commit(self, new_power_on: bool) -> None:
         try:
             if self._debounce > 0:
                 await asyncio.sleep(self._debounce)
 
-            current_online, current_state, _age = self._compute_online()
-            if current_online != new_online:
+            current_power_on, current_state, current_voltage, _age = self._compute_power()
+            if current_power_on != new_power_on:
                 return
 
-            self._set_data(new_online, current_state)
+            self._set_data(new_power_on, current_state, current_voltage)
 
-            # коли стає онлайн — одразу ping
-            if new_online:
+            if new_power_on:
                 self._fire_svitlobot_ping_if_needed()
 
         except asyncio.CancelledError:
