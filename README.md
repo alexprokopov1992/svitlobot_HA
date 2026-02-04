@@ -14,7 +14,7 @@
 - **Refresh**: опціонально примусово викликає `homeassistant.update_entity` раз на N секунд.
 - **SvitloBot ping**: якщо світло є (online) — GET-запит:
   `https://api.svitlobot.in.ua/channelPing?channel_key=<SVITLOBOT_CHANNEL_KEY>`
-  приблизно раз на **30 секунд**.
+  приблизно раз на **65 секунд**.
 
 ---
 
