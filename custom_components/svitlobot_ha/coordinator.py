@@ -161,7 +161,7 @@ class PowerWatchdogCoordinator(DataUpdateCoordinator[WatchdogData]):
 
             new_power_on, new_voltage = _is_power_on(new_state_str)
 
-            _LOGGER.debug(
+            _LOGGER.error(
                 "State change %s: old=%s new=%s -> power_on=%s voltage=%s",
                 self._voltage_entity_id,
                 old_state_str,
