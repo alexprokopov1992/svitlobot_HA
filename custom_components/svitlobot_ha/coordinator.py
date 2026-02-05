@@ -61,7 +61,9 @@ def _is_power_on(state_str: str | None) -> tuple[bool, float | None]:
     v = _parse_voltage(state_str)
 
     if v is None:
-        return (False, None)
+        return (True, None)
+    else:
+        return (True, v)
 
     return (v >= POWER_ON_THRESHOLD, v)
 
